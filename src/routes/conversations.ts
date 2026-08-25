@@ -1,25 +1,19 @@
 import express from 'express';
 import type { RowDataPacket } from 'mysql2';
 import { config } from '../config.ts';
-import { execute, queryOne, queryRows } from '../db/mysql.ts';
+import { execute, queryRows } from '../db/mysql.ts';
 import { asyncHandler } from '../http/errors.ts';
 import { requiredId, requiredIdArray, requiredText } from '../http/validate.ts';
 
 export const conversationsRouter = express.Router();
 
-interface ConversationRow extends RowDataPacket {
+interface SidebarRow extends RowDataPacket {
   id: number;
   title: string;
-}
-
-interface LastMessageRow extends RowDataPacket {
-  id: number;
-  senderId: number;
-  createdAt: Date;
-}
-
-interface CountRow extends RowDataPacket {
-  count: number;
+  messageCount: number;
+  lastMessageId: number | null;
+  lastSenderId: number | null;
+  lastCreatedAt: Date | null;
 }
 
 conversationsRouter.get(
@@ -27,42 +21,44 @@ conversationsRouter.get(
   asyncHandler(async (req, res) => {
     const userId = requiredId(req.query.userId, 'userId');
 
-    const conversations = await queryRows<ConversationRow>(
-      `SELECT c.id, c.title
+    // Previously this issued two extra queries per conversation — 1 + 2N round trips, each of
+    // them a full table scan. The correlated subqueries below run inside the database and are
+    // served by the (conversation_id, id) index: a backward seek for the newest id, an
+    // index-only scan for the count.
+    const rows = await queryRows<SidebarRow>(
+      `SELECT c.id,
+              c.title,
+              (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS messageCount,
+              lm.id         AS lastMessageId,
+              lm.sender_id  AS lastSenderId,
+              lm.created_at AS lastCreatedAt
        FROM conversations c
        JOIN conversation_participants p ON p.conversation_id = c.id
+       LEFT JOIN messages lm
+              ON lm.id = (SELECT MAX(m2.id) FROM messages m2 WHERE m2.conversation_id = c.id)
        WHERE p.user_id = ?
        ORDER BY c.id ASC`,
       [userId],
     );
 
-    const result = [];
-    for (const conversation of conversations) {
-      const last = await queryOne<LastMessageRow>(
-        `SELECT id, sender_id AS senderId, created_at AS createdAt
-         FROM messages WHERE conversation_id = ? ORDER BY id DESC LIMIT 1`,
-        [conversation.id],
-      );
-      const counted = await queryOne<CountRow>(
-        'SELECT COUNT(*) AS count FROM messages WHERE conversation_id = ?',
-        [conversation.id],
-      );
-      result.push({
-        ...conversation,
-        lastMessage: last ?? null,
-        messageCount: counted?.count ?? 0,
-      });
-    }
-
-    res.json(result);
+    res.json(
+      rows.map((row) => ({
+        id: row.id,
+        title: row.title,
+        messageCount: Number(row.messageCount),
+        lastMessage:
+          row.lastMessageId === null
+            ? null
+            : { id: row.lastMessageId, senderId: row.lastSenderId, createdAt: row.lastCreatedAt },
+      })),
+    );
   }),
 );
 
 conversationsRouter.post(
   '/',
   asyncHandler(async (req, res) => {
-    const body: unknown = req.body;
-    const input = (body ?? {}) as Record<string, unknown>;
+    const input = (req.body ?? {}) as Record<string, unknown>;
 
     const title = requiredText(input.title, 'title', config.maxTitleLength);
     const participantIds = requiredIdArray(input.participantIds, 'participantIds');
@@ -70,12 +66,13 @@ conversationsRouter.post(
     const created = await execute('INSERT INTO conversations (title) VALUES (?)', [title]);
     const id = created.insertId;
 
-    for (const participantId of participantIds) {
-      await execute(
-        'INSERT INTO conversation_participants (conversation_id, user_id) VALUES (?, ?)',
-        [id, participantId],
-      );
-    }
+    // One statement instead of one per participant.
+    await execute(
+      `INSERT INTO conversation_participants (conversation_id, user_id) VALUES ${participantIds
+        .map(() => '(?, ?)')
+        .join(', ')}`,
+      participantIds.flatMap((participantId) => [id, participantId]),
+    );
 
     res.status(201).json({ id, title, participantIds });
   }),
