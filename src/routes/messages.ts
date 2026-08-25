@@ -3,6 +3,8 @@ import type { RowDataPacket } from 'mysql2';
 import { config } from '../config.ts';
 import { queryRows } from '../db/mysql.ts';
 import { asyncHandler, HttpError } from '../http/errors.ts';
+import { callerId } from '../http/identity.ts';
+import { assertParticipant } from '../services/conversations.ts';
 import { limit, optionalClientId, optionalId, requiredId, requiredText } from '../http/validate.ts';
 import { createMessage, messageBodies, verifyBody } from '../services/messages.ts';
 import { emit } from '../bus.ts';
@@ -26,9 +28,13 @@ messagesRouter.post(
     const input = (req.body ?? {}) as Record<string, unknown>;
 
     // Validate before consulting the limiter, so a malformed request does not spend quota.
+    const senderId = callerId(req);
     const conversationId = requiredId(input.conversationId, 'conversationId');
-    const senderId = requiredId(input.senderId, 'senderId');
     const body = requiredText(input.body, 'body', config.maxMessageLength);
+
+    // Previously senderId came from the body, so anyone could post as anyone, into any
+    // conversation, without being in it.
+    await assertParticipant(senderId, conversationId);
     const clientId = optionalClientId(input.clientId);
 
     const limit = await checkLimit(sendKey(senderId, conversationId));
@@ -75,6 +81,7 @@ messagesRouter.get(
   '/',
   asyncHandler(async (req, res) => {
     const conversationId = requiredId(req.query.conversationId, 'conversationId');
+    await assertParticipant(callerId(req), conversationId);
     const before = optionalId(req.query.before, 'before');
     const pageSize = limit(req.query.limit, 'limit', DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
 
@@ -112,7 +119,7 @@ messagesRouter.get(
 
     res.json({
       messages: rows.map((row) => ({ ...row, body: bodyById.get(row.id) ?? '' })),
-      // Cursor for the next older page; absent once the oldest message has been returned.
+      // Cursor for the next older page; null once the oldest message has been returned.
       nextBefore: rows.length === pageSize ? rows[0]?.id : null,
     });
   }),

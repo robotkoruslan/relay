@@ -3,7 +3,8 @@ import type { RowDataPacket } from 'mysql2';
 import { config } from '../config.ts';
 import { execute, queryRows } from '../db/mysql.ts';
 import { asyncHandler } from '../http/errors.ts';
-import { requiredId, requiredIdArray, requiredText } from '../http/validate.ts';
+import { callerId } from '../http/identity.ts';
+import { requiredIdArray, requiredText } from '../http/validate.ts';
 
 export const conversationsRouter = express.Router();
 
@@ -19,7 +20,8 @@ interface SidebarRow extends RowDataPacket {
 conversationsRouter.get(
   '/',
   asyncHandler(async (req, res) => {
-    const userId = requiredId(req.query.userId, 'userId');
+    // Your conversations, not an arbitrary user's: the id comes from the caller, not the query.
+    const userId = callerId(req);
 
     // Previously this issued two extra queries per conversation — 1 + 2N round trips, each of
     // them a full table scan. The correlated subqueries below run inside the database and are
@@ -60,8 +62,11 @@ conversationsRouter.post(
   asyncHandler(async (req, res) => {
     const input = (req.body ?? {}) as Record<string, unknown>;
 
+    const userId = callerId(req);
     const title = requiredText(input.title, 'title', config.maxTitleLength);
-    const participantIds = requiredIdArray(input.participantIds, 'participantIds');
+    // The creator is always a participant, otherwise it is possible to create a conversation
+    // that the creator cannot then read.
+    const participantIds = [...new Set([userId, ...requiredIdArray(input.participantIds, 'participantIds')])];
 
     const created = await execute('INSERT INTO conversations (title) VALUES (?)', [title]);
     const id = created.insertId;

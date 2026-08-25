@@ -1,7 +1,10 @@
 import { WebSocketServer, WebSocket } from 'ws';
-import type { Server } from 'node:http';
+import type { IncomingMessage, Server } from 'node:http';
+import { callerIdFromUrl } from '../http/identity.ts';
+import { participantConversationIds } from '../services/conversations.ts';
 
 type Client = WebSocket & {
+  userId?: number;
   subs?: Set<number>;
   /** Cleared before each ping; a client that never ponged back is dropped on the next sweep. */
   alive?: boolean;
@@ -17,7 +20,16 @@ let heartbeat: NodeJS.Timeout | undefined;
 export function attachWs(server: Server): void {
   wss = new WebSocketServer({ server });
 
-  wss.on('connection', (ws: Client) => {
+  wss.on('connection', (ws: Client, req: IncomingMessage) => {
+    // Browsers cannot set headers on a WebSocket handshake, so identity comes from the query
+    // string. Same caveat as the HTTP header: stated, not proven. See http/identity.ts.
+    const userId = callerIdFromUrl(req.url);
+    if (userId === undefined) {
+      ws.close(1008, 'userId is required');
+      return;
+    }
+
+    ws.userId = userId;
     ws.subs = new Set();
     ws.alive = true;
     clients.add(ws);
@@ -27,16 +39,7 @@ export function attachWs(server: Server): void {
     });
 
     ws.on('message', (raw) => {
-      try {
-        const frame: unknown = JSON.parse(raw.toString());
-        if (typeof frame !== 'object' || frame === null) return;
-        const { type, conversationIds } = frame as { type?: unknown; conversationIds?: unknown };
-        if (type === 'subscribe' && Array.isArray(conversationIds)) {
-          ws.subs = new Set(conversationIds.map(Number).filter(Number.isInteger));
-        }
-      } catch {
-        /* ignore malformed frames */
-      }
+      void handleFrame(ws, raw.toString());
     });
 
     // Without this a socket error surfaces as an uncaught exception and kills the process.
@@ -60,6 +63,29 @@ export function attachWs(server: Server): void {
     }
   }, HEARTBEAT_MS);
   heartbeat.unref();
+}
+
+async function handleFrame(ws: Client, raw: string): Promise<void> {
+  let frame: unknown;
+  try {
+    frame = JSON.parse(raw);
+  } catch {
+    return; // malformed frames are ignored
+  }
+  if (typeof frame !== 'object' || frame === null) return;
+
+  const { type, conversationIds } = frame as { type?: unknown; conversationIds?: unknown };
+  if (type !== 'subscribe' || !Array.isArray(conversationIds) || ws.userId === undefined) return;
+
+  const requested = new Set(conversationIds.map(Number).filter(Number.isInteger));
+  try {
+    // A socket used to be able to subscribe to any id and tail conversations it had no part in.
+    // Intersecting with real membership makes the subscription list unforgeable.
+    const allowed = await participantConversationIds(ws.userId);
+    ws.subs = new Set(allowed.filter((id) => requested.has(id)));
+  } catch (err) {
+    console.error('[ws] could not resolve subscriptions', err);
+  }
 }
 
 /**
