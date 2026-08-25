@@ -1,46 +1,34 @@
 /**
  * Measures send latency and, more importantly, whether sending starves everything else.
  *
- * The second number is the interesting one: it times a route that touches no database while
- * sends are in flight. If that number is not close to zero, the process is not waiting on I/O,
- * it is burning CPU on the event loop, and every other user on the instance pays for it.
+ * The last number is the interesting one: it times a route that touches no database while sends
+ * are in flight. If that is not close to its idle value, the process is not waiting on I/O — it
+ * is burning CPU on the event loop, and every other user on the instance pays for it.
  *
  *   docker compose exec api npx tsx scripts/bench-send.ts
+ *
+ * Sends rotate across the seeded users so a burst stays inside the per-user rate limit; a 429 is
+ * waited out rather than treated as an error, since the limiter is not what is being measured.
  */
 
-export {};
+import { BASE, postMessage, withUser } from './probe.ts';
 
-const BASE = process.env.BENCH_BASE ?? 'http://127.0.0.1:3000';
-const CONVERSATION_ID = Number(process.env.BENCH_CONVERSATION ?? 1);
-const SEQUENTIAL = Number(process.env.BENCH_SEQUENTIAL ?? 20);
-const CONCURRENT = Number(process.env.BENCH_CONCURRENT ?? 10);
+const SEQUENTIAL = Number(process.env.BENCH_SEQUENTIAL ?? 9);
+const CONCURRENT = Number(process.env.BENCH_CONCURRENT ?? 6);
+/** Seeded users, all made participants of the conversation this script creates. */
+const USERS = [1, 2, 3];
 
-async function timed(run: () => Promise<Response>): Promise<number> {
+async function timed(run: () => Promise<unknown>): Promise<number> {
   const started = performance.now();
-  const res = await run();
-  await res.arrayBuffer();
-  if (!res.ok && res.status !== 200 && res.status !== 201) {
-    throw new Error(`unexpected ${res.status} from ${res.url}`);
-  }
+  await run();
   return performance.now() - started;
 }
 
-function send(label: string): Promise<Response> {
-  return fetch(`${BASE}/api/messages`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      conversationId: CONVERSATION_ID,
-      senderId: 1,
-      body: `bench ${label}`,
-      clientId: `bench-${label}`,
-    }),
-  });
-}
-
 /** A route with no database work at all, so its latency is pure event-loop availability. */
-function idleRoute(): Promise<Response> {
-  return fetch(`${BASE}/api/search?q=`);
+async function idleRoute(): Promise<void> {
+  const res = await fetch(`${BASE}/api/search?q=`, withUser(1));
+  await res.arrayBuffer();
+  if (!res.ok) throw new Error(`idle route returned ${res.status}`);
 }
 
 function stats(samples: number[]): string {
@@ -52,20 +40,32 @@ function stats(samples: number[]): string {
 
 const stamp = Date.now();
 
-const sequential: number[] = [];
-for (let i = 0; i < SEQUENTIAL; i++) {
-  sequential.push(await timed(() => send(`${stamp}-seq-${i}`)));
-}
-console.log(`sequential send  (n=${SEQUENTIAL})   ${stats(sequential)}`);
+// Its own conversation, so the benchmark neither depends on nor pollutes the seeded ones.
+const created = await fetch(
+  `${BASE}/api/conversations`,
+  withUser(USERS[0] ?? 1, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: `bench ${stamp}`, participantIds: USERS }),
+  }),
+);
+if (!created.ok) throw new Error(`could not create a conversation: ${created.status}`);
+const { id: conversationId } = (await created.json()) as { id: number };
+console.log(`benchmarking against conversation ${conversationId} as users ${USERS.join(', ')}\n`);
+
+const send = (label: string, i: number) =>
+  postMessage(USERS[i % USERS.length] ?? 1, conversationId, `bench ${label}`, `bench-${label}`);
 
 // Baseline for the idle route with nothing else happening.
 const idleQuiet: number[] = [];
 for (let i = 0; i < 5; i++) idleQuiet.push(await timed(idleRoute));
-console.log(`idle route, quiet (n=5)         ${stats(idleQuiet)}`);
+console.log(`idle route, quiet      (n=5)    ${stats(idleQuiet)}`);
 
-// Same route, sampled repeatedly while sends are in flight.
+// The concurrent burst runs first, on fresh rate-limit quota. If it ran after the sequential
+// phase it would spend its time waiting out a 429, and would measure the limiter rather than
+// the send path.
 const flood = Array.from({ length: CONCURRENT }, (_, i) =>
-  timed(() => send(`${stamp}-conc-${i}`)),
+  timed(() => send(`${stamp}-conc-${i}`, i)),
 );
 const idleUnderLoad: number[] = [];
 const sampler = (async () => {
@@ -74,5 +74,17 @@ const sampler = (async () => {
 const concurrent = await Promise.all(flood);
 await sampler;
 
-console.log(`concurrent send  (n=${CONCURRENT})   ${stats(concurrent)}`);
+console.log(`concurrent send  (n=${String(CONCURRENT).padEnd(2)})     ${stats(concurrent)}`);
 console.log(`idle route, under load (n=10)   ${stats(idleUnderLoad)}   <-- event-loop starvation`);
+
+// Let the rate-limit window drain before spending more quota, so the sequential figures are
+// send latency and not a queue behind Retry-After.
+const drainMs = Number(process.env.RATE_LIMIT_WINDOW_MS ?? 10_000) + 500;
+console.log(`\n(waiting ${drainMs}ms for the rate-limit window to drain)`);
+await new Promise((r) => setTimeout(r, drainMs));
+
+const sequential: number[] = [];
+for (let i = 0; i < SEQUENTIAL; i++) {
+  sequential.push(await timed(() => send(`${stamp}-seq-${i}`, i)));
+}
+console.log(`sequential send  (n=${String(SEQUENTIAL).padEnd(2)})     ${stats(sequential)}`);

@@ -12,22 +12,29 @@
  */
 
 import { WebSocket } from 'ws';
+import { BASE, postMessage, withUser } from './probe.ts';
 
-const BASE = process.env.CHECK_BASE ?? 'http://envoy:3000';
 const CLIENTS = Number(process.env.CHECK_CLIENTS ?? 6);
 const MESSAGES = Number(process.env.CHECK_MESSAGES ?? 8);
 const CONVERSATION_ID = Number(process.env.CHECK_CONVERSATION ?? 1);
 const SETTLE_MS = Number(process.env.CHECK_SETTLE_MS ?? 2000);
 
+// Both are participants of the seeded conversation 1. Rotating the sender also keeps each one
+// inside the per-user rate limit for a burst this size.
+const USERS = [1, 2];
+
 interface Client {
   index: number;
+  userId: number;
   socket: WebSocket;
   received: Set<number>;
 }
 
 function open(index: number): Promise<Client> {
-  const socket = new WebSocket(`${BASE.replace(/^http/, 'ws')}/`);
-  const client: Client = { index, socket, received: new Set() };
+  const userId = USERS[index % USERS.length] ?? 1;
+  // The handshake carries identity on the query string; a socket without it is rejected.
+  const socket = new WebSocket(`${BASE.replace(/^http/, 'ws')}/?userId=${userId}`);
+  const client: Client = { index, userId, socket, received: new Set() };
 
   socket.on('message', (raw) => {
     const event = JSON.parse(raw.toString()) as { type?: string; id?: number };
@@ -53,19 +60,14 @@ const sentIds: number[] = [];
 const servedBy = new Map<string, number>();
 
 for (let i = 0; i < MESSAGES; i++) {
-  const res = await fetch(`${BASE}/api/messages`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      conversationId: CONVERSATION_ID,
-      senderId: 1,
-      body: `fan-out probe ${i}`,
-      clientId: `fanout-${stamp}-${i}`,
-    }),
-  });
-  const instance = res.headers.get('x-relay-instance') ?? 'unknown';
-  servedBy.set(instance, (servedBy.get(instance) ?? 0) + 1);
-  const message = (await res.json()) as { id: number };
+  const sender = USERS[i % USERS.length] ?? 1;
+  const message = await postMessage(
+    sender,
+    CONVERSATION_ID,
+    `fan-out probe ${i}`,
+    `fanout-${stamp}-${i}`,
+  );
+  servedBy.set(message.instance, (servedBy.get(message.instance) ?? 0) + 1);
   sentIds.push(message.id);
 }
 
@@ -80,7 +82,7 @@ let missing = 0;
 for (const client of clients) {
   const absent = sentIds.filter((id) => !client.received.has(id));
   const status = absent.length === 0 ? 'all' : `${client.received.size}/${MESSAGES}  MISSED ${absent.length}`;
-  console.log(`  client ${client.index}: ${status}`);
+  console.log(`  client ${client.index} (user ${client.userId}): ${status}`);
   missing += absent.length;
 }
 
