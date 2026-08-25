@@ -116,14 +116,15 @@ function connectWs() {
   };
 }
 
-async function fetchMessages(id, before) {
+async function fetchMessages(id, { before, around } = {}) {
   const params = new URLSearchParams({ conversationId: id });
   if (before) params.set('before', before);
+  if (around) params.set('around', around);
   const res = await api(`/api/messages?${params}`);
   return res.json();
 }
 
-async function openConversation(id, title) {
+async function openConversation(id, title, focusMessageId) {
   activeConversation = id;
   activeTitle = title;
   const c = conversations.find((x) => x.id === id);
@@ -131,12 +132,18 @@ async function openConversation(id, title) {
   renderSidebar();
 
   document.getElementById('title').textContent = title;
-  const page = await fetchMessages(id);
+  const page = await fetchMessages(id, focusMessageId ? { around: focusMessageId } : {});
   loadedMessages = page.messages;
   olderCursor = page.nextBefore;
-  renderMessages();
+  renderMessages(focusMessageId);
+
   const pane = document.getElementById('messages');
-  pane.scrollTop = pane.scrollHeight;
+  if (focusMessageId) {
+    // Opened from a search hit: show that message rather than the bottom of the transcript.
+    pane.querySelector('.msg.focus')?.scrollIntoView({ block: 'center' });
+  } else {
+    pane.scrollTop = pane.scrollHeight;
+  }
 }
 
 async function loadOlder() {
@@ -145,7 +152,7 @@ async function loadOlder() {
   const heightBefore = pane.scrollHeight;
   const topBefore = pane.scrollTop;
 
-  const page = await fetchMessages(activeConversation, olderCursor);
+  const page = await fetchMessages(activeConversation, { before: olderCursor });
   loadedMessages = page.messages.concat(loadedMessages);
   olderCursor = page.nextBefore;
   renderMessages();
@@ -154,14 +161,14 @@ async function loadOlder() {
   pane.scrollTop = topBefore + (pane.scrollHeight - heightBefore);
 }
 
-function messageNode(m) {
+function messageNode(m, focusMessageId) {
   const div = document.createElement('div');
-  div.className = 'msg';
+  div.className = m.id === focusMessageId ? 'msg focus' : 'msg';
   div.textContent = `#${m.senderId}: ${m.body}`;
   return div;
 }
 
-function renderMessages() {
+function renderMessages(focusMessageId) {
   const pane = document.getElementById('messages');
   pane.innerHTML = '';
   if (olderCursor) {
@@ -171,7 +178,7 @@ function renderMessages() {
     more.onclick = loadOlder;
     pane.appendChild(more);
   }
-  for (const m of loadedMessages) pane.appendChild(messageNode(m));
+  for (const m of loadedMessages) pane.appendChild(messageNode(m, focusMessageId));
 }
 
 function appendMessage(m) {
@@ -278,7 +285,8 @@ function renderResults(q, results) {
     const title = document.createElement('strong');
     title.textContent = r.conversationTitle ?? '#' + r.conversationId;
     div.append(title, ' — ' + (r.body ?? ''));
-    div.onclick = () => openConversation(r.conversationId, r.conversationTitle ?? '#' + r.conversationId);
+    div.onclick = () =>
+      openConversation(r.conversationId, r.conversationTitle ?? '#' + r.conversationId, r.messageId);
     pane.appendChild(div);
   }
 }

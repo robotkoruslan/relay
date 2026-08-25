@@ -83,22 +83,49 @@ messagesRouter.get(
     const conversationId = requiredId(req.query.conversationId, 'conversationId');
     await assertParticipant(callerId(req), conversationId);
     const before = optionalId(req.query.before, 'before');
+    const around = optionalId(req.query.around, 'around');
     const pageSize = limit(req.query.limit, 'limit', DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
 
-    // Keyset pagination on the primary key rather than OFFSET: it stays cheap on deep pages and
-    // cannot skip or repeat rows when new messages arrive mid-scroll.
-    const rows = await queryRows<MessageRow>(
-      `SELECT id, conversation_id AS conversationId, sender_id AS senderId, created_at AS createdAt
-       FROM messages
-       WHERE conversation_id = ?${before === undefined ? '' : ' AND id < ?'}
-       ORDER BY id DESC
-       LIMIT ?`,
-      before === undefined ? [conversationId, pageSize] : [conversationId, before, pageSize],
-    );
+    const columns =
+      'id, conversation_id AS conversationId, sender_id AS senderId, created_at AS createdAt';
 
-    // Fetched newest-first so the newest page is the cheap one; returned oldest-first because
-    // that is the order the transcript renders in.
-    rows.reverse();
+    let rows: MessageRow[];
+    let olderPageWasFull: boolean;
+
+    if (around !== undefined) {
+      // Opening a search hit: centre the page on that message instead of returning the newest
+      // page, which would not contain it. Two seeks, both on (conversation_id, id).
+      const olderSize = Math.ceil(pageSize / 2);
+      const [older, newer] = await Promise.all([
+        queryRows<MessageRow>(
+          `SELECT ${columns} FROM messages
+           WHERE conversation_id = ? AND id <= ? ORDER BY id DESC LIMIT ?`,
+          [conversationId, around, olderSize],
+        ),
+        queryRows<MessageRow>(
+          `SELECT ${columns} FROM messages
+           WHERE conversation_id = ? AND id > ? ORDER BY id ASC LIMIT ?`,
+          [conversationId, around, pageSize - olderSize],
+        ),
+      ]);
+      older.reverse();
+      rows = [...older, ...newer];
+      olderPageWasFull = older.length === olderSize;
+    } else {
+      // Keyset pagination on the primary key rather than OFFSET: it stays cheap on deep pages
+      // and cannot skip or repeat rows when new messages arrive mid-scroll.
+      rows = await queryRows<MessageRow>(
+        `SELECT ${columns} FROM messages
+         WHERE conversation_id = ?${before === undefined ? '' : ' AND id < ?'}
+         ORDER BY id DESC
+         LIMIT ?`,
+        before === undefined ? [conversationId, pageSize] : [conversationId, before, pageSize],
+      );
+      // Fetched newest-first so the newest page is the cheap one; returned oldest-first because
+      // that is the order the transcript renders in.
+      rows.reverse();
+      olderPageWasFull = rows.length === pageSize;
+    }
 
     const ids = rows.map((row) => row.id);
     const bodies = ids.length
@@ -120,7 +147,7 @@ messagesRouter.get(
     res.json({
       messages: rows.map((row) => ({ ...row, body: bodyById.get(row.id) ?? '' })),
       // Cursor for the next older page; null once the oldest message has been returned.
-      nextBefore: rows.length === pageSize ? rows[0]?.id : null,
+      nextBefore: olderPageWasFull ? (rows[0]?.id ?? null) : null,
     });
   }),
 );
