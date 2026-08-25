@@ -20,6 +20,7 @@
     #title { padding: 12px; margin: 0; border-bottom: 1px solid #ddd; }
     #messages { flex: 1; overflow-y: auto; padding: 12px; }
     .msg { padding: 6px 0; }
+    #notice { padding: 8px 12px; background: #fff4e5; border-top: 1px solid #f0d0a0; font-size: 13px; }
     #composer { display: flex; border-top: 1px solid #ddd; padding: 8px; gap: 8px; }
     #text { flex: 1; padding: 8px; }
     #loadOlder { display: block; margin: 0 auto 12px; padding: 4px 10px; cursor: pointer; }
@@ -39,6 +40,7 @@
   <div id="main">
     <h3 id="title">Pick a conversation</h3>
     <div id="messages"></div>
+    <div id="notice" hidden></div>
     <form id="composer">
       <input id="text" autocomplete="off" placeholder="Message…" />
       <button>Send</button>

@@ -18,6 +18,16 @@ async function refreshConversations() {
   subscribe();
 }
 
+function showNotice(text) {
+  const notice = document.getElementById('notice');
+  notice.textContent = text;
+  notice.hidden = false;
+}
+
+function hideNotice() {
+  document.getElementById('notice').hidden = true;
+}
+
 function setConnected(connected) {
   const dot = document.getElementById('wsStatus');
   dot.textContent = connected ? '\u25CF' : '\u25CB';
@@ -161,8 +171,9 @@ document.getElementById('composer').onsubmit = async (e) => {
   sending = true;
   button.disabled = true;
   input.value = '';
+  hideNotice();
   try {
-    await fetch('/api/messages', {
+    const res = await fetch('/api/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -172,6 +183,32 @@ document.getElementById('composer').onsubmit = async (e) => {
         clientId: crypto.randomUUID(),
       }),
     });
+
+    if (res.status === 429) {
+      // Hand the text back rather than discarding it, and hold the button for as long as the
+      // server asked instead of letting the user hammer into a wall of 429s.
+      input.value = body;
+      let seconds = Number(res.headers.get('Retry-After')) || 1;
+      showNotice(`Sending too fast — try again in ${seconds}s`);
+      await new Promise((resolve) => {
+        const tick = setInterval(() => {
+          seconds -= 1;
+          if (seconds > 0) {
+            showNotice(`Sending too fast — try again in ${seconds}s`);
+            return;
+          }
+          clearInterval(tick);
+          hideNotice();
+          resolve();
+        }, 1000);
+      });
+      return;
+    }
+
+    if (!res.ok) {
+      input.value = body;
+      showNotice('Could not send that message. Try again.');
+    }
   } finally {
     sending = false;
     button.disabled = false;
