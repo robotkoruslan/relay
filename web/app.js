@@ -8,8 +8,17 @@ let olderCursor = null;    // id to page backwards from, or null once fully load
 let sending = false;
 let wsRetries = 0;
 
+// Every request carries the caller id. A real deployment would send a session cookie or a
+// bearer token instead; the server-side checks would not change.
+function api(path, options = {}) {
+  return fetch(path, {
+    ...options,
+    headers: { ...(options.headers ?? {}), 'x-user-id': String(userId) },
+  });
+}
+
 async function refreshConversations() {
-  const res = await fetch(`/api/conversations?userId=${userId}`);
+  const res = await api('/api/conversations');
   const fresh = await res.json();
   // Unread is tracked client-side, so carry it across a refetch instead of clearing it.
   const unread = new Map(conversations.map((c) => [c.id, c.unread]));
@@ -41,8 +50,20 @@ function renderSidebar() {
   for (const c of conversations) {
     const li = document.createElement('li');
     if (c.id === activeConversation) li.className = 'active';
-    li.innerHTML =
-      `<span>${c.title} (${c.messageCount})</span>` + (c.unread ? '<span class="dot">●</span>' : '');
+
+    // Built as text, not interpolated into innerHTML: the title is free text typed by a user
+    // and stored, so `<img src=x onerror=...>` as a title used to execute in every
+    // participant's session.
+    const label = document.createElement('span');
+    label.textContent = `${c.title} (${c.messageCount})`;
+    li.appendChild(label);
+    if (c.unread) {
+      const dot = document.createElement('span');
+      dot.className = 'dot';
+      dot.textContent = '\u25CF';
+      li.appendChild(dot);
+    }
+
     li.onclick = () => openConversation(c.id, c.title);
     list.appendChild(li);
   }
@@ -54,7 +75,9 @@ function subscribe() {
 }
 
 function connectWs() {
-  const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/`);
+  const socket = new WebSocket(
+    `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/?userId=${userId}`,
+  );
   ws = socket;
 
   socket.onopen = async () => {
@@ -96,7 +119,7 @@ function connectWs() {
 async function fetchMessages(id, before) {
   const params = new URLSearchParams({ conversationId: id });
   if (before) params.set('before', before);
-  const res = await fetch(`/api/messages?${params}`);
+  const res = await api(`/api/messages?${params}`);
   return res.json();
 }
 
@@ -173,12 +196,11 @@ document.getElementById('composer').onsubmit = async (e) => {
   input.value = '';
   hideNotice();
   try {
-    const res = await fetch('/api/messages', {
+    const res = await api('/api/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         conversationId: activeConversation,
-        senderId: userId,
         body,
         clientId: crypto.randomUUID(),
       }),
@@ -218,10 +240,10 @@ document.getElementById('composer').onsubmit = async (e) => {
 document.getElementById('newConv').onclick = async () => {
   const title = prompt('Conversation title?');
   if (!title) return;
-  await fetch('/api/conversations', {
+  await api('/api/conversations', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title, participantIds: [userId, 2] }),
+    body: JSON.stringify({ title, participantIds: [2] }),
   });
   await refreshConversations();
 };
@@ -230,7 +252,7 @@ document.getElementById('searchForm').onsubmit = async (e) => {
   e.preventDefault();
   const q = document.getElementById('search').value.trim();
   if (!q) return;
-  const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+  const res = await api(`/api/search?q=${encodeURIComponent(q)}`);
   renderResults(q, await res.json());
 };
 
