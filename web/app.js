@@ -7,6 +7,8 @@ let loadedMessages = [];   // ascending, the pages fetched for the open conversa
 let olderCursor = null;    // id to page backwards from, or null once fully loaded
 let sending = false;
 let wsRetries = 0;
+let lastTypingSent = 0;
+const typingUsers = new Map();   // userId -> timeout id, per open conversation
 
 // Every request carries the caller id. A real deployment would send a session cookie or a
 // bearer token instead; the server-side checks would not change.
@@ -25,6 +27,53 @@ async function refreshConversations() {
   conversations = fresh.map((c) => ({ ...c, unread: unread.get(c.id) ?? false }));
   renderSidebar();
   subscribe();
+}
+
+// Announce at most this often while someone keeps typing. Per keystroke would be one event per
+// character, for no extra information.
+const TYPING_THROTTLE_MS = 2000;
+// How long a notice stands on its own. A stop event clears it immediately, but if that event is
+// lost — a closed tab, a dropped socket — the indicator must not stick forever.
+const TYPING_EXPIRY_MS = 3000;
+
+function sendTyping(active) {
+  if (ws?.readyState !== WebSocket.OPEN || !activeConversation) return;
+  if (active) {
+    const now = Date.now();
+    if (now - lastTypingSent < TYPING_THROTTLE_MS) return;
+    lastTypingSent = now;
+  } else {
+    lastTypingSent = 0;
+  }
+  ws.send(JSON.stringify({ type: 'typing', conversationId: activeConversation, active }));
+}
+
+function renderTyping() {
+  const line = document.getElementById('typing');
+  const who = [...typingUsers.keys()];
+  if (who.length === 0) {
+    line.textContent = '';
+  } else if (who.length === 1) {
+    line.textContent = `#${who[0]} is typing…`;
+  } else {
+    line.textContent = `${who.length} people are typing…`;
+  }
+}
+
+function noteTyping(userId, active) {
+  clearTimeout(typingUsers.get(userId));
+  if (!active) {
+    typingUsers.delete(userId);
+  } else {
+    typingUsers.set(userId, setTimeout(() => { typingUsers.delete(userId); renderTyping(); }, TYPING_EXPIRY_MS));
+  }
+  renderTyping();
+}
+
+function clearTyping() {
+  for (const timer of typingUsers.values()) clearTimeout(timer);
+  typingUsers.clear();
+  renderTyping();
 }
 
 function showNotice(text) {
@@ -91,7 +140,15 @@ function connectWs() {
 
   socket.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
+
+    if (msg.type === 'typing') {
+      if (msg.conversationId === activeConversation) noteTyping(msg.userId, msg.active);
+      return;
+    }
+
     if (msg.type !== 'message') return;
+    // Someone who just sent a message is no longer typing.
+    if (msg.conversationId === activeConversation) noteTyping(msg.senderId, false);
     if (loadedMessages.some((m) => m.id === msg.id)) return;
     const c = conversations.find((x) => x.id === msg.conversationId);
     if (c) c.messageCount += 1;
@@ -125,6 +182,7 @@ async function fetchMessages(id, { before, around } = {}) {
 }
 
 async function openConversation(id, title, focusMessageId) {
+  if (activeConversation !== id) clearTyping();
   activeConversation = id;
   activeTitle = title;
   const c = conversations.find((x) => x.id === id);
@@ -202,6 +260,7 @@ document.getElementById('composer').onsubmit = async (e) => {
   button.disabled = true;
   input.value = '';
   hideNotice();
+  sendTyping(false);
   try {
     const res = await api('/api/messages', {
       method: 'POST',
@@ -244,6 +303,13 @@ document.getElementById('composer').onsubmit = async (e) => {
   }
 };
 
+const composerInput = document.getElementById('text');
+composerInput.addEventListener('input', () => {
+  sendTyping(composerInput.value.trim().length > 0);
+});
+// Leaving the box is as good a signal as sending: clear the indicator rather than let it expire.
+composerInput.addEventListener('blur', () => sendTyping(false));
+
 document.getElementById('newConv').onclick = async () => {
   const title = prompt('Conversation title?');
   if (!title) return;
@@ -265,6 +331,7 @@ document.getElementById('searchForm').onsubmit = async (e) => {
 
 function renderResults(q, results) {
   activeConversation = null;
+  clearTyping();
   loadedMessages = [];
   olderCursor = null;
   document.getElementById('title').textContent = `Search: "${q}"`;
