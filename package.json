@@ -6,7 +6,9 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
-    "seed": "tsx docker/db/seed.ts"
+    "seed": "tsx docker/db/seed.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/**/*.test.ts"
   },
   "dependencies": {
     "express": "^4.19.2",

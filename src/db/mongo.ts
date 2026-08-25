@@ -1,23 +1,39 @@
 import { MongoClient, type Db } from 'mongodb';
 import { config } from '../config.ts';
 
-const client = new MongoClient(config.mongoUrl);
+const client = new MongoClient(config.mongoUrl, {
+  // Fail fast instead of inheriting the driver's 30s default, which turns a dependency
+  // outage into a 30s hang on every request that touches Mongo.
+  serverSelectionTimeoutMS: config.dbTimeoutMs,
+  connectTimeoutMS: config.dbTimeoutMs,
+});
+
 let db: Db | undefined;
 
 export async function connectMongo(retries = 20): Promise<Db> {
+  let lastErr: unknown;
   for (let i = 0; i < retries; i++) {
     try {
       await client.connect();
       db = client.db();
       return db;
-    } catch {
+    } catch (err) {
+      lastErr = err;
       await new Promise((r) => setTimeout(r, 1500));
     }
   }
-  throw new Error('mongo not reachable');
+  throw new Error(`mongo not reachable after ${retries} attempts: ${String(lastErr)}`);
 }
 
 export function mongo(): Db {
   if (!db) throw new Error('mongo not connected');
   return db;
+}
+
+export async function pingMongo(): Promise<void> {
+  await mongo().command({ ping: 1 });
+}
+
+export async function closeMongo(): Promise<void> {
+  await client.close();
 }
