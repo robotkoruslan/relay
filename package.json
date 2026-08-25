@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "express": "^4.19.2",
+    "ioredis": "^5.4.1",
     "mongodb": "^6.8.0",
     "mysql2": "^3.11.3",
     "ws": "^8.18.0"
