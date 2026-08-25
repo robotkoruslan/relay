@@ -68,6 +68,24 @@ function dispatch(event: BusEvent): void {
   }
 }
 
+/** Resolves when the client is usable, or after the timeout. Never rejects: see connectBus. */
+function waitReady(client: Redis, label: string, timeoutMs: number): Promise<boolean> {
+  if (client.status === 'ready') return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const done = (ready: boolean) => {
+      clearTimeout(timer);
+      client.off('ready', onReady);
+      resolve(ready);
+    };
+    const onReady = () => done(true);
+    const timer = setTimeout(() => {
+      console.error(`[bus] ${label} not ready after ${timeoutMs}ms, continuing degraded`);
+      done(false);
+    }, timeoutMs);
+    client.once('ready', onReady);
+  });
+}
+
 export async function connectBus(): Promise<void> {
   subscriber.on('message', (_channel: string, raw: string) => {
     try {
@@ -76,9 +94,31 @@ export async function connectBus(): Promise<void> {
       console.error('[bus] undecodable event dropped', err);
     }
   });
-  // Resubscribes automatically after a reconnect; ioredis replays subscriptions.
-  await subscriber.subscribe(CHANNEL);
-  console.log('[bus] subscribed to', CHANNEL);
+
+  // Subscribe on every 'ready', which covers both the first connection and every reconnect
+  // after an outage. Subscribing to a channel already subscribed to is a no-op.
+  const subscribeNow = () => {
+    subscriber.subscribe(CHANNEL).then(
+      () => console.log('[bus] subscribed to', CHANNEL),
+      (err: Error) => console.error('[bus] subscribe failed', err.message),
+    );
+  };
+  subscriber.on('ready', subscribeNow);
+  if (subscriber.status === 'ready') subscribeNow();
+
+  // Wait for both connections so a normal boot has a working bus before the first request —
+  // with enableOfflineQueue off, a command issued mid-connect fails immediately. But never
+  // fail startup: Redis is an optional dependency, and refusing to boot without it would turn
+  // a degraded fan-out into a total outage.
+  await Promise.all([
+    waitReady(redis, 'command connection', config.dbTimeoutMs),
+    waitReady(subscriber, 'subscriber', config.dbTimeoutMs),
+  ]);
+}
+
+/** Used by tests, which must not race the initial connection. */
+export function busReady(timeoutMs = 5000): Promise<boolean> {
+  return waitReady(redis, 'command connection', timeoutMs);
 }
 
 export async function emit(event: BusEvent): Promise<void> {
