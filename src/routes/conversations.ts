@@ -4,7 +4,8 @@ import { config } from '../config.ts';
 import { execute, queryRows } from '../db/mysql.ts';
 import { asyncHandler } from '../http/errors.ts';
 import { callerId } from '../http/identity.ts';
-import { requiredIdArray, requiredText } from '../http/validate.ts';
+import { requiredId, requiredIdArray, requiredText } from '../http/validate.ts';
+import { assertParticipant } from '../services/conversations.ts';
 
 export const conversationsRouter = express.Router();
 
@@ -12,6 +13,7 @@ interface SidebarRow extends RowDataPacket {
   id: number;
   title: string;
   messageCount: number;
+  unreadCount: number;
   lastMessageId: number | null;
   lastSenderId: number | null;
   lastCreatedAt: Date | null;
@@ -31,6 +33,10 @@ conversationsRouter.get(
       `SELECT c.id,
               c.title,
               (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS messageCount,
+              (SELECT COUNT(*) FROM messages m
+                WHERE m.conversation_id = c.id
+                  AND m.id > COALESCE(p.last_read_message_id, 0)
+                  AND m.sender_id <> p.user_id)                                AS unreadCount,
               lm.id         AS lastMessageId,
               lm.sender_id  AS lastSenderId,
               lm.created_at AS lastCreatedAt
@@ -48,12 +54,36 @@ conversationsRouter.get(
         id: row.id,
         title: row.title,
         messageCount: Number(row.messageCount),
+        unreadCount: Number(row.unreadCount),
         lastMessage:
           row.lastMessageId === null
             ? null
             : { id: row.lastMessageId, senderId: row.lastSenderId, createdAt: row.lastCreatedAt },
       })),
     );
+  }),
+);
+
+conversationsRouter.post(
+  '/:id/read',
+  asyncHandler(async (req, res) => {
+    const userId = callerId(req);
+    const conversationId = requiredId(req.params.id, 'id');
+    await assertParticipant(userId, conversationId);
+
+    const input = (req.body ?? {}) as Record<string, unknown>;
+    const messageId = requiredId(input.messageId, 'messageId');
+
+    // GREATEST keeps the cursor monotonic. Two tabs, or requests arriving out of order, would
+    // otherwise move it backwards and resurrect messages the user has already read.
+    await execute(
+      `UPDATE conversation_participants
+       SET last_read_message_id = GREATEST(COALESCE(last_read_message_id, 0), ?)
+       WHERE conversation_id = ? AND user_id = ?`,
+      [messageId, conversationId, userId],
+    );
+
+    res.status(204).end();
   }),
 );
 

@@ -112,6 +112,28 @@ const migrations: Migration[] = [
       console.log('[migrate]   messages.created_at widened to millisecond precision');
     },
   },
+  {
+    // Unread state lived only in one browser tab's memory: the API never returned it and a
+    // refresh wiped it, so the dot meant nothing after a reload. A read cursor per participant
+    // makes it real and shared between an account's devices.
+    id: '004-read-cursors',
+    async run(conn) {
+      const [columns] = await conn.query<RowDataPacket[]>(
+        `SELECT 1 FROM information_schema.COLUMNS
+         WHERE table_schema = DATABASE() AND table_name = 'conversation_participants'
+           AND column_name = 'last_read_message_id' LIMIT 1`,
+      );
+      if (columns.length > 0) {
+        console.log('[migrate]   conversation_participants.last_read_message_id already present');
+        return;
+      }
+      await conn.query(
+        `ALTER TABLE conversation_participants
+         ADD COLUMN last_read_message_id BIGINT NULL`,
+      );
+      console.log('[migrate]   conversation_participants.last_read_message_id added');
+    },
+  },
 ];
 
 export async function runMigrations(): Promise<void> {

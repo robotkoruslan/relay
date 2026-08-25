@@ -21,12 +21,20 @@ function api(path, options = {}) {
 
 async function refreshConversations() {
   const res = await api('/api/conversations');
-  const fresh = await res.json();
-  // Unread is tracked client-side, so carry it across a refetch instead of clearing it.
-  const unread = new Map(conversations.map((c) => [c.id, c.unread]));
-  conversations = fresh.map((c) => ({ ...c, unread: unread.get(c.id) ?? false }));
+  // unreadCount comes from the server now, computed against a stored read cursor, so a refetch
+  // is authoritative rather than something local state has to be preserved across.
+  conversations = await res.json();
   renderSidebar();
   subscribe();
+}
+
+async function markRead(conversationId, messageId) {
+  if (!messageId) return;
+  await api(`/api/conversations/${conversationId}/read`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messageId }),
+  });
 }
 
 // Announce at most this often while someone keeps typing. Per keystroke would be one event per
@@ -106,10 +114,11 @@ function renderSidebar() {
     const label = document.createElement('span');
     label.textContent = `${c.title} (${c.messageCount})`;
     li.appendChild(label);
-    if (c.unread) {
+    if (c.unreadCount > 0) {
       const dot = document.createElement('span');
       dot.className = 'dot';
       dot.textContent = '\u25CF';
+      dot.title = `${c.unreadCount} unread`;
       li.appendChild(dot);
     }
 
@@ -154,8 +163,10 @@ function connectWs() {
     if (c) c.messageCount += 1;
     if (msg.conversationId === activeConversation) {
       appendMessage(msg);
-    } else if (c) {
-      c.unread = true;
+      // Read as it arrives, so the cursor does not fall behind while the conversation is open.
+      void markRead(msg.conversationId, msg.id);
+    } else if (c && msg.senderId !== userId) {
+      c.unreadCount = (c.unreadCount ?? 0) + 1;
     }
     renderSidebar();
   };
@@ -186,7 +197,7 @@ async function openConversation(id, title, focusMessageId) {
   activeConversation = id;
   activeTitle = title;
   const c = conversations.find((x) => x.id === id);
-  if (c) c.unread = false;
+  if (c) c.unreadCount = 0;
   renderSidebar();
 
   document.getElementById('title').textContent = title;
@@ -194,6 +205,7 @@ async function openConversation(id, title, focusMessageId) {
   loadedMessages = page.messages;
   olderCursor = page.nextBefore;
   renderMessages(focusMessageId);
+  await markRead(id, loadedMessages.at(-1)?.id);
 
   const pane = document.getElementById('messages');
   if (focusMessageId) {
