@@ -5,7 +5,7 @@ import { queryRows } from '../db/mysql.ts';
 import { asyncHandler } from '../http/errors.ts';
 import { limit, optionalClientId, optionalId, requiredId, requiredText } from '../http/validate.ts';
 import { createMessage, messageBodies, verifyBody } from '../services/messages.ts';
-import { broadcast } from '../ws/hub.ts';
+import { emit } from '../bus.ts';
 
 export const messagesRouter = express.Router();
 
@@ -38,7 +38,14 @@ messagesRouter.post(
       return;
     }
 
-    broadcast(message.conversationId, { type: 'message', ...message });
+    await emit({
+      type: 'message',
+      conversationId: message.conversationId,
+      id: message.id,
+      senderId: message.senderId,
+      body: message.body,
+      createdAt: message.createdAt.toISOString(),
+    });
     res.status(201).json(message);
   }),
 );

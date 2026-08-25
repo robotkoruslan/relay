@@ -19,6 +19,10 @@ function positiveInt(name: string, fallback: number): number {
 export const config = {
   port: positiveInt('PORT', 3000),
 
+  /** Container hostname under compose; makes it visible which instance served a request. */
+  instanceId: process.env.HOSTNAME || 'local',
+
+
   /**
    * Key for the integrity tag stored with each message body. Required rather than defaulted:
    * a signing key with a known fallback value is not a signing key.

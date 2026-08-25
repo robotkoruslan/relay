@@ -7,16 +7,21 @@ import { beginDraining } from './lifecycle.ts';
 import { closeMysql, waitForMysql } from './db/mysql.ts';
 import { runMigrations } from './db/migrations.ts';
 import { closeMongo, connectMongo } from './db/mongo.ts';
+import { closeBus, connectBus, onBusEvent } from './bus.ts';
 import { errorHandler, notFoundHandler } from './http/errors.ts';
 import { conversationsRouter } from './routes/conversations.ts';
 import { healthRouter } from './routes/health.ts';
 import { messagesRouter } from './routes/messages.ts';
 import { searchRouter } from './routes/search.ts';
-import { attachWs, closeWs } from './ws/hub.ts';
+import { attachWs, closeWs, deliverLocal } from './ws/hub.ts';
 
 const webRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'web');
 
 const app = express();
+app.use((_req, res, next) => {
+  res.setHeader('x-relay-instance', config.instanceId);
+  next();
+});
 app.use(express.json({ limit: config.jsonBodyLimit }));
 app.use(express.static(webRoot));
 app.use('/healthz', healthRouter);
@@ -34,6 +39,10 @@ attachWs(server);
 await waitForMysql();
 await runMigrations();
 await connectMongo();
+await connectBus();
+
+// Every instance delivers every event to its own sockets, including events it published itself.
+onBusEvent((event) => deliverLocal(event.conversationId, event));
 
 server.listen(config.port, () => {
   console.log(`relay listening on :${config.port}`);
@@ -59,7 +68,7 @@ async function shutdown(reason: string, exitCode = 0): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));
     });
-    await Promise.allSettled([closeMysql(), closeMongo()]);
+    await Promise.allSettled([closeMysql(), closeMongo(), closeBus()]);
     console.log('[shutdown] complete');
     process.exit(exitCode);
   } catch (err) {
