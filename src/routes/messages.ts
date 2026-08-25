@@ -4,7 +4,7 @@ import { config } from '../config.ts';
 import { queryRows } from '../db/mysql.ts';
 import { asyncHandler } from '../http/errors.ts';
 import { limit, optionalClientId, optionalId, requiredId, requiredText } from '../http/validate.ts';
-import { createMessage, messageBodies } from '../services/messages.ts';
+import { createMessage, messageBodies, verifyBody } from '../services/messages.ts';
 import { broadcast } from '../ws/hub.ts';
 
 export const messagesRouter = express.Router();
@@ -68,10 +68,19 @@ messagesRouter.get(
     const ids = rows.map((row) => row.id);
     const bodies = ids.length
       ? await messageBodies()
-          .find({ _id: { $in: ids } }, { projection: { body: 1 } })
+          .find({ _id: { $in: ids } }, { projection: { body: 1, signature: 1 } })
           .toArray()
       : [];
     const bodyById = new Map(bodies.map((doc) => [doc._id, doc.body]));
+
+    // The integrity tag was written but never checked, which made it decorative. Verifying is
+    // a few microseconds per message now that it is an HMAC. A failure is logged rather than
+    // hidden from the reader, since the body is still the best copy available.
+    for (const doc of bodies) {
+      if (verifyBody(doc.body, doc.signature) === false) {
+        console.error(`[messages] signature mismatch on message ${doc._id}`);
+      }
+    }
 
     res.json({
       messages: rows.map((row) => ({ ...row, body: bodyById.get(row.id) ?? '' })),

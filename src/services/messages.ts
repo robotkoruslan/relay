@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import type { RowDataPacket } from 'mysql2';
 import { mongo } from '../db/mongo.ts';
+import { config } from '../config.ts';
 import { execute, queryOne } from '../db/mysql.ts';
 import { HttpError } from '../http/errors.ts';
 
@@ -46,11 +47,35 @@ export function messageBodies() {
 }
 
 /**
- * Integrity tag stored alongside the body. Kept in one place so the seed and the write path
- * cannot drift apart.
+ * Integrity tag stored alongside the body, so a body altered directly in Mongo can be told
+ * apart from one this service wrote.
+ *
+ * This was pbkdf2Sync with 200k rounds — a password-hashing primitive doing an integrity job.
+ * Two things were wrong with that. It cost ~40ms of synchronous CPU per send on the event loop,
+ * which starved every other request on the instance; and with a constant salt and no key it
+ * proved nothing, since anyone able to write the record could recompute the value. HMAC is the
+ * primitive this actually wanted: keyed, and microseconds.
+ *
+ * The version prefix means the algorithm can change without every existing row failing
+ * verification.
  */
+const SIGNATURE_VERSION = 'v2';
+
 export function signBody(body: string): string {
-  return crypto.pbkdf2Sync(body, 'relay-signing', 200000, 32, 'sha256').toString('hex');
+  const mac = crypto.createHmac('sha256', config.messageSigningKey).update(body, 'utf8').digest('hex');
+  return `${SIGNATURE_VERSION}:${mac}`;
+}
+
+/**
+ * Returns null when the signature predates the current scheme, so legacy rows are reported as
+ * unverifiable rather than as tampered with.
+ */
+export function verifyBody(body: string, signature: string | undefined): boolean | null {
+  if (!signature?.startsWith(`${SIGNATURE_VERSION}:`)) return null;
+  const expected = Buffer.from(signBody(body), 'utf8');
+  const actual = Buffer.from(signature, 'utf8');
+  // Length check first: timingSafeEqual throws on a mismatch rather than returning false.
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
 }
 
 function isDuplicateEntry(err: unknown): boolean {

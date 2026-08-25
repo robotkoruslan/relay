@@ -19,6 +19,12 @@ function positiveInt(name: string, fallback: number): number {
 export const config = {
   port: positiveInt('PORT', 3000),
 
+  /**
+   * Key for the integrity tag stored with each message body. Required rather than defaulted:
+   * a signing key with a known fallback value is not a signing key.
+   */
+  messageSigningKey: required('MESSAGE_SIGNING_KEY'),
+
   mysqlUrl: required('MYSQL_URL'),
   mongoUrl: required('MONGO_URL'),
   redisUrl: required('REDIS_URL'),
