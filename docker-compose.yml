@@ -10,7 +10,10 @@ services:
     build:
       context: .
       dockerfile: docker/app/Dockerfile
-    command: npm start
+    # Run node as PID 1. Via `npm start` the signal goes to npm, which does not proxy it to
+    # the child, so SIGTERM never reaches the app and shutdown is never graceful.
+    command: node --import tsx src/index.ts
+    stop_grace_period: 15s
     restart: on-failure
     env_file: .env
     expose: ["3000"]
