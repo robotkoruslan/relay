@@ -51,26 +51,35 @@ pure cost.
 
 ## Measured
 
-`scripts/bench-send.ts`, same stack, same seed data, before and after. The last row is the one
-that matters: it times `GET /api/search?q=` — a route that touches no database — while sends are
-in flight. Its latency is pure event-loop availability.
+`scripts/bench-send.ts`, same stack, same data, before and after. The last row is the one that
+matters: it times `GET /api/search?q=` — which returns before touching any database — while sends
+are in flight. Its latency is therefore pure event-loop availability.
 
-|                                       | before  | after   |
-|---------------------------------------|---------|---------|
-| sequential send, mean                 | 39.0 ms | 9.8 ms  |
-| sequential send, p95                  | 76.9 ms | 58.2 ms |
-| 10 concurrent sends, mean             | 340.1 ms| 31.9 ms |
-| 10 concurrent sends, p95              | 362.7 ms| 37.3 ms |
-| idle route while quiet, mean          | 3.0 ms  | 3.7 ms  |
-| **idle route under load, p95**        | **191.8 ms** | **10.1 ms** |
+|                                       | before   | after   |
+|---------------------------------------|----------|---------|
+| sequential send, mean                 | 38.6 ms  | 6.3 ms  |
+| sequential send, p95                  | 54.3 ms  | 9.0 ms  |
+| 6 concurrent sends, mean              | 93.1 ms  | 20.2 ms |
+| 6 concurrent sends, p95               | 116.8 ms | 21.0 ms |
+| idle route while quiet, mean          | 4.3 ms   | 4.6 ms  |
+| **idle route under load, p95**        | **38.9 ms** | **6.6 ms** |
 
-Before, ten concurrent sends served each other in a queue — 340ms mean for work that is a couple
-of database round trips — and an unrelated request waited up to 191ms behind key derivations it
-had nothing to do with.
-
-After, the idle route under load (4.8ms mean) is indistinguishable from the same route with the
-server idle (3.7ms). The event loop is free; sends now wait on the database, which is what they
+Before, six concurrent sends served each other in a queue, and an unrelated request that does no
+work at all waited up to 39ms behind key derivations it had nothing to do with. After, the idle
+route under load (3.7ms mean, 6.6ms p95) is indistinguishable from the same route with the server
+idle (4.6ms mean). The event loop is free; sends now wait on the database, which is what they
 should be waiting on.
+
+To reproduce the "before" column, temporarily put `pbkdf2Sync` back in `signBody` and restart the
+api container. The numbers above were taken exactly that way, so the committed script reproduces
+the committed table.
+
+**On burst size.** The concurrent burst is six rather than something larger because rate limiting
+now caps how fast one user can send, and the benchmark rotates across the three seeded users to
+stay inside it. An earlier run — taken before the limiter existed, at a burst of ten — showed the
+idle route reaching **191.8ms p95** against 3.0ms quiet. Same effect, larger because more key
+derivations were queued. The limiter is a real constraint on what the benchmark can generate, and
+the six-wide figures are the ones the committed script produces today.
 
 ## Tamper detection, end to end
 
