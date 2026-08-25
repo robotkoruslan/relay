@@ -2,15 +2,27 @@ const userId = 1;
 let ws;
 let activeConversation;
 let conversations = [];
+let activeTitle = '';
 let loadedMessages = [];   // ascending, the pages fetched for the open conversation
 let olderCursor = null;    // id to page backwards from, or null once fully loaded
 let sending = false;
+let wsRetries = 0;
 
-async function loadConversations() {
+async function refreshConversations() {
   const res = await fetch(`/api/conversations?userId=${userId}`);
-  conversations = await res.json();
+  const fresh = await res.json();
+  // Unread is tracked client-side, so carry it across a refetch instead of clearing it.
+  const unread = new Map(conversations.map((c) => [c.id, c.unread]));
+  conversations = fresh.map((c) => ({ ...c, unread: unread.get(c.id) ?? false }));
   renderSidebar();
-  connectWs();
+  subscribe();
+}
+
+function setConnected(connected) {
+  const dot = document.getElementById('wsStatus');
+  dot.textContent = connected ? '\u25CF' : '\u25CB';
+  dot.title = connected ? 'live' : 'reconnecting…';
+  dot.style.color = connected ? '#30a46c' : '#e5484d';
 }
 
 function renderSidebar() {
@@ -26,14 +38,28 @@ function renderSidebar() {
   }
 }
 
+function subscribe() {
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: 'subscribe', conversationIds: conversations.map((c) => c.id) }));
+}
+
 function connectWs() {
-  if (ws) ws.close();
-  ws = new WebSocket(`ws://${location.host}/`);
-  ws.onopen = () =>
-    ws.send(JSON.stringify({ type: 'subscribe', conversationIds: conversations.map((c) => c.id) }));
-  ws.onmessage = (ev) => {
+  const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/`);
+  ws = socket;
+
+  socket.onopen = async () => {
+    wsRetries = 0;
+    setConnected(true);
+    // A pub/sub bus does not replay. Anything sent while this client was disconnected was
+    // simply missed, so refetch rather than assume what is on screen is current.
+    await refreshConversations();
+    if (activeConversation) await openConversation(activeConversation, activeTitle);
+  };
+
+  socket.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
     if (msg.type !== 'message') return;
+    if (loadedMessages.some((m) => m.id === msg.id)) return;
     const c = conversations.find((x) => x.id === msg.conversationId);
     if (c) c.messageCount += 1;
     if (msg.conversationId === activeConversation) {
@@ -42,6 +68,18 @@ function connectWs() {
       c.unread = true;
     }
     renderSidebar();
+  };
+
+  // Previously neither of these was handled, so a single dropped socket — an instance restart,
+  // a sleeping laptop — ended live updates permanently while the UI still looked healthy.
+  socket.onclose = () => {
+    if (ws !== socket) return;   // superseded by a newer socket
+    setConnected(false);
+    const backoff = Math.min(30000, 500 * 2 ** wsRetries++);
+    setTimeout(connectWs, backoff + Math.random() * 250);   // jitter, so clients do not sync up
+  };
+  socket.onerror = () => {
+    /* onclose always follows, and reconnecting is handled there */
   };
 }
 
@@ -54,6 +92,7 @@ async function fetchMessages(id, before) {
 
 async function openConversation(id, title) {
   activeConversation = id;
+  activeTitle = title;
   const c = conversations.find((x) => x.id === id);
   if (c) c.unread = false;
   renderSidebar();
@@ -147,7 +186,7 @@ document.getElementById('newConv').onclick = async () => {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ title, participantIds: [userId, 2] }),
   });
-  await loadConversations();
+  await refreshConversations();
 };
 
 document.getElementById('searchForm').onsubmit = async (e) => {
@@ -185,4 +224,8 @@ function renderResults(q, results) {
   }
 }
 
-loadConversations();
+// Wrapped: this file is loaded as a classic script, where top-level await is a syntax error.
+(async () => {
+  await refreshConversations();
+  connectWs();
+})();

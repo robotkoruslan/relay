@@ -10,6 +10,7 @@
     #sidebar header { display: flex; align-items: center; justify-content: space-between; padding: 12px; }
     #sidebar h2 { font-size: 13px; text-transform: uppercase; color: #888; margin: 0; }
     #newConv { font-size: 13px; cursor: pointer; }
+    #wsStatus { font-size: 10px; vertical-align: middle; }
     #conversations { list-style: none; margin: 0; padding: 0; }
     #conversations li { padding: 12px; cursor: pointer; border-bottom: 1px solid #f0f0f0; display: flex; justify-content: space-between; align-items: center; }
     #conversations li:hover { background: #f6f6f6; }
@@ -29,7 +30,7 @@
 <body>
   <div id="sidebar">
     <header>
-      <h2>Conversations</h2>
+      <h2>Conversations <span id="wsStatus" title="connecting…">○</span></h2>
       <button id="newConv">+ New</button>
     </header>
     <form id="searchForm"><input id="search" autocomplete="off" placeholder="Search messages…" /></form>
