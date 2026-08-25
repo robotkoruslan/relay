@@ -1,7 +1,13 @@
 import mysql, { type ResultSetHeader, type RowDataPacket } from 'mysql2/promise';
 import { config } from '../config.ts';
 
-export const pool = mysql.createPool(config.mysqlUrl);
+export const pool = mysql.createPool({
+  uri: config.mysqlUrl,
+  // Read and write DATETIME/TIMESTAMP as UTC. Without this mysql2 converts using the process
+  // timezone, so the same row reads back differently depending on where the app runs.
+  timezone: 'Z',
+  connectTimeout: config.dbTimeoutMs,
+});
 
 /** What a placeholder may legitimately be bound to. Keeps `unknown` out of the query layer. */
 export type SqlValue = string | number | boolean | Date | null;

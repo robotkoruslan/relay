@@ -5,6 +5,7 @@ import express from 'express';
 import { config } from './config.ts';
 import { beginDraining } from './lifecycle.ts';
 import { closeMysql, waitForMysql } from './db/mysql.ts';
+import { runMigrations } from './db/migrations.ts';
 import { closeMongo, connectMongo } from './db/mongo.ts';
 import { errorHandler, notFoundHandler } from './http/errors.ts';
 import { conversationsRouter } from './routes/conversations.ts';
@@ -31,6 +32,7 @@ const server = http.createServer(app);
 attachWs(server);
 
 await waitForMysql();
+await runMigrations();
 await connectMongo();
 
 server.listen(config.port, () => {
