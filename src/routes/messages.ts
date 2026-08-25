@@ -2,10 +2,11 @@ import express from 'express';
 import type { RowDataPacket } from 'mysql2';
 import { config } from '../config.ts';
 import { queryRows } from '../db/mysql.ts';
-import { asyncHandler } from '../http/errors.ts';
+import { asyncHandler, HttpError } from '../http/errors.ts';
 import { limit, optionalClientId, optionalId, requiredId, requiredText } from '../http/validate.ts';
 import { createMessage, messageBodies, verifyBody } from '../services/messages.ts';
 import { emit } from '../bus.ts';
+import { checkLimit, sendKey } from '../rate-limit.ts';
 
 export const messagesRouter = express.Router();
 
@@ -24,11 +25,31 @@ messagesRouter.post(
   asyncHandler(async (req, res) => {
     const input = (req.body ?? {}) as Record<string, unknown>;
 
+    // Validate before consulting the limiter, so a malformed request does not spend quota.
+    const conversationId = requiredId(input.conversationId, 'conversationId');
+    const senderId = requiredId(input.senderId, 'senderId');
+    const body = requiredText(input.body, 'body', config.maxMessageLength);
+    const clientId = optionalClientId(input.clientId);
+
+    const limit = await checkLimit(sendKey(senderId, conversationId));
+    res.setHeader('RateLimit-Limit', String(limit.limit));
+    res.setHeader('RateLimit-Remaining', String(limit.remaining));
+    if (!limit.allowed) {
+      // Whole seconds, and never zero: Retry-After: 0 invites an immediate retry that is
+      // certain to be refused as well.
+      const retryAfter = Math.max(1, Math.ceil(limit.retryAfterMs / 1000));
+      throw HttpError.tooManyRequests(
+        `too many messages in this conversation, retry in ${retryAfter}s`,
+        { limit: limit.limit, windowMs: config.rateLimitWindowMs, retryAfterMs: limit.retryAfterMs },
+        { 'Retry-After': String(retryAfter) },
+      );
+    }
+
     const { message, deduplicated } = await createMessage({
-      conversationId: requiredId(input.conversationId, 'conversationId'),
-      senderId: requiredId(input.senderId, 'senderId'),
-      body: requiredText(input.body, 'body', config.maxMessageLength),
-      clientId: optionalClientId(input.clientId),
+      conversationId,
+      senderId,
+      body,
+      clientId,
     });
 
     if (deduplicated) {

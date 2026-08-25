@@ -9,13 +9,30 @@ export class HttpError extends Error {
   readonly status: number;
   readonly code: string;
   readonly details: unknown;
+  /** Response headers the status is meaningless without, e.g. Retry-After on a 429. */
+  readonly headers: Record<string, string>;
 
-  constructor(status: number, code: string, message: string, details?: unknown) {
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    details?: unknown,
+    headers: Record<string, string> = {},
+  ) {
     super(message);
     this.name = 'HttpError';
     this.status = status;
     this.code = code;
     this.details = details;
+    this.headers = headers;
+  }
+
+  static tooManyRequests(
+    message: string,
+    details: unknown,
+    headers: Record<string, string>,
+  ): HttpError {
+    return new HttpError(429, 'rate_limited', message, details, headers);
   }
 
   static badRequest(message: string, details?: unknown): HttpError {
@@ -61,6 +78,7 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, next) => {
   }
 
   if (err instanceof HttpError) {
+    for (const [name, value] of Object.entries(err.headers)) res.setHeader(name, value);
     res.status(err.status).json({
       error: { code: err.code, message: err.message, details: err.details },
     });

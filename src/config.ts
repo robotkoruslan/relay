@@ -47,6 +47,13 @@ export const config = {
   /** Mirrors messages.client_id VARCHAR(64). */
   maxClientIdLength: 64,
 
+  /**
+   * Sends allowed per user per conversation, per window. The brief calls these a ballpark, so
+   * they are configurable rather than baked in.
+   */
+  rateLimitMax: positiveInt('RATE_LIMIT_MAX', 5),
+  rateLimitWindowMs: positiveInt('RATE_LIMIT_WINDOW_MS', 10_000),
+
   /** How long to let in-flight work finish after SIGTERM before exiting anyway. */
   shutdownTimeoutMs: positiveInt('SHUTDOWN_TIMEOUT_MS', 10_000),
 };
