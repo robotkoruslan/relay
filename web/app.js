@@ -2,6 +2,9 @@ const userId = 1;
 let ws;
 let activeConversation;
 let conversations = [];
+let loadedMessages = [];   // ascending, the pages fetched for the open conversation
+let olderCursor = null;    // id to page backwards from, or null once fully loaded
+let sending = false;
 
 async function loadConversations() {
   const res = await fetch(`/api/conversations?userId=${userId}`);
@@ -42,6 +45,13 @@ function connectWs() {
   };
 }
 
+async function fetchMessages(id, before) {
+  const params = new URLSearchParams({ conversationId: id });
+  if (before) params.set('before', before);
+  const res = await fetch(`/api/messages?${params}`);
+  return res.json();
+}
+
 async function openConversation(id, title) {
   activeConversation = id;
   const c = conversations.find((x) => x.id === id);
@@ -49,38 +59,84 @@ async function openConversation(id, title) {
   renderSidebar();
 
   document.getElementById('title').textContent = title;
-  const res = await fetch(`/api/messages?conversationId=${id}`);
-  const messages = await res.json();
+  const page = await fetchMessages(id);
+  loadedMessages = page.messages;
+  olderCursor = page.nextBefore;
+  renderMessages();
   const pane = document.getElementById('messages');
-  pane.innerHTML = '';
-  for (const m of messages) appendMessage(m);
+  pane.scrollTop = pane.scrollHeight;
 }
 
-function appendMessage(m) {
+async function loadOlder() {
+  if (!olderCursor) return;
   const pane = document.getElementById('messages');
+  const heightBefore = pane.scrollHeight;
+  const topBefore = pane.scrollTop;
+
+  const page = await fetchMessages(activeConversation, olderCursor);
+  loadedMessages = page.messages.concat(loadedMessages);
+  olderCursor = page.nextBefore;
+  renderMessages();
+
+  // Keep the reader where they were rather than snapping to the newly prepended top.
+  pane.scrollTop = topBefore + (pane.scrollHeight - heightBefore);
+}
+
+function messageNode(m) {
   const div = document.createElement('div');
   div.className = 'msg';
   div.textContent = `#${m.senderId}: ${m.body}`;
-  pane.appendChild(div);
+  return div;
+}
+
+function renderMessages() {
+  const pane = document.getElementById('messages');
+  pane.innerHTML = '';
+  if (olderCursor) {
+    const more = document.createElement('button');
+    more.id = 'loadOlder';
+    more.textContent = 'Load older messages';
+    more.onclick = loadOlder;
+    pane.appendChild(more);
+  }
+  for (const m of loadedMessages) pane.appendChild(messageNode(m));
+}
+
+function appendMessage(m) {
+  loadedMessages.push(m);
+  const pane = document.getElementById('messages');
+  pane.appendChild(messageNode(m));
   pane.scrollTop = pane.scrollHeight;
 }
 
 document.getElementById('composer').onsubmit = async (e) => {
   e.preventDefault();
   const input = document.getElementById('text');
+  const button = document.querySelector('#composer button');
   const body = input.value.trim();
-  if (!body || !activeConversation) return;
+  if (!body || !activeConversation || sending) return;
+
+  // A send is not instant. Without blocking here, an impatient second click posts the message
+  // twice; the server now dedupes on clientId, but the same clientId has to be reused for that
+  // to help, so the simplest correct thing is not to fire a second request at all.
+  sending = true;
+  button.disabled = true;
   input.value = '';
-  await fetch('/api/messages', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      conversationId: activeConversation,
-      senderId: userId,
-      body,
-      clientId: crypto.randomUUID(),
-    }),
-  });
+  try {
+    await fetch('/api/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        conversationId: activeConversation,
+        senderId: userId,
+        body,
+        clientId: crypto.randomUUID(),
+      }),
+    });
+  } finally {
+    sending = false;
+    button.disabled = false;
+  }
 };
 
 document.getElementById('newConv').onclick = async () => {
@@ -104,6 +160,8 @@ document.getElementById('searchForm').onsubmit = async (e) => {
 
 function renderResults(q, results) {
   activeConversation = null;
+  loadedMessages = [];
+  olderCursor = null;
   document.getElementById('title').textContent = `Search: "${q}"`;
   const pane = document.getElementById('messages');
   pane.innerHTML = '';

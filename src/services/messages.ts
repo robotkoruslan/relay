@@ -1,6 +1,8 @@
 import crypto from 'node:crypto';
-import { pool } from '../db/mysql.ts';
+import type { RowDataPacket } from 'mysql2';
 import { mongo } from '../db/mongo.ts';
+import { execute, queryOne } from '../db/mysql.ts';
+import { HttpError } from '../http/errors.ts';
 
 export interface NewMessage {
   conversationId: number;
@@ -9,28 +11,120 @@ export interface NewMessage {
   clientId: string | null;
 }
 
-export async function createMessage(input: NewMessage) {
+export interface StoredMessage {
+  id: number;
+  conversationId: number;
+  senderId: number;
+  body: string;
+  createdAt: Date;
+}
+
+export interface CreateMessageResult {
+  message: StoredMessage;
+  /** True when clientId matched an existing message, so nothing new was stored. */
+  deduplicated: boolean;
+}
+
+interface MessageRow extends RowDataPacket {
+  id: number;
+  conversationId: number;
+  senderId: number;
+  createdAt: Date;
+}
+
+export interface MessageBodyDoc {
+  _id: number;
+  conversationId: number;
+  senderId: number;
+  body: string;
+  signature: string;
+  createdAt: Date;
+}
+
+export function messageBodies() {
+  return mongo().collection<MessageBodyDoc>('message_bodies');
+}
+
+/**
+ * Integrity tag stored alongside the body. Kept in one place so the seed and the write path
+ * cannot drift apart.
+ */
+export function signBody(body: string): string {
+  return crypto.pbkdf2Sync(body, 'relay-signing', 200000, 32, 'sha256').toString('hex');
+}
+
+function isDuplicateEntry(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: string }).code === 'ER_DUP_ENTRY';
+}
+
+async function findByClientId(
+  conversationId: number,
+  clientId: string,
+): Promise<StoredMessage | undefined> {
+  const row = await queryOne<MessageRow>(
+    `SELECT id, conversation_id AS conversationId, sender_id AS senderId, created_at AS createdAt
+     FROM messages WHERE conversation_id = ? AND client_id = ?`,
+    [conversationId, clientId],
+  );
+  if (!row) return undefined;
+
+  const doc = await messageBodies().findOne({ _id: row.id });
+  return { ...row, body: doc?.body ?? '' };
+}
+
+export async function createMessage(input: NewMessage): Promise<CreateMessageResult> {
   const { conversationId, senderId, body, clientId } = input;
 
-  const signature = crypto
-    .pbkdf2Sync(body, 'relay-signing', 200000, 32, 'sha256')
-    .toString('hex');
+  const signature = signBody(body);
 
-  const [res] = await pool.execute(
-    'INSERT INTO messages (conversation_id, sender_id, client_id) VALUES (?, ?, ?)',
-    [conversationId, senderId, clientId],
-  );
-  const id = (res as { insertId: number }).insertId;
-
+  // One timestamp, generated here and written to both stores, so the POST response, the
+  // WebSocket payload and a later refetch all agree.
   const createdAt = new Date();
-  await mongo().collection('message_bodies').insertOne({
-    _id: id as never,
-    conversationId,
-    senderId,
-    body,
-    signature,
-    createdAt,
-  });
 
-  return { id, conversationId, senderId, body, createdAt };
+  let id: number;
+  try {
+    const result = await execute(
+      `INSERT INTO messages (conversation_id, sender_id, client_id, created_at)
+       VALUES (?, ?, ?, ?)`,
+      [conversationId, senderId, clientId, createdAt],
+    );
+    id = result.insertId;
+  } catch (err) {
+    // A retry or a double-click resends the same clientId. The unique index turns that into a
+    // duplicate-key error, which means the message already exists — return it as-is.
+    if (clientId !== null && isDuplicateEntry(err)) {
+      const existing = await findByClientId(conversationId, clientId);
+      if (existing) return { message: existing, deduplicated: true };
+    }
+    throw err;
+  }
+
+  try {
+    await messageBodies().insertOne({
+      _id: id,
+      conversationId,
+      senderId,
+      body,
+      signature,
+      createdAt,
+    });
+  } catch (err) {
+    // The row exists but its body does not, and no transaction spans the two stores. Undo the
+    // row so the send fails visibly, rather than leaving a message that renders blank forever.
+    try {
+      await execute('DELETE FROM messages WHERE id = ?', [id]);
+    } catch (cleanupErr) {
+      console.error(
+        `[messages] orphaned row ${id}: body write failed and the row could not be removed`,
+        cleanupErr,
+      );
+    }
+    console.error(`[messages] body write failed for ${id}, send rejected`, err);
+    throw HttpError.unavailable('message could not be stored, please retry');
+  }
+
+  return {
+    message: { id, conversationId, senderId, body, createdAt },
+    deduplicated: false,
+  };
 }
