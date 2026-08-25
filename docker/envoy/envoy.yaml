@@ -21,10 +21,24 @@ static_resources:
                     - name: app
                       domains: ["*"]
                       routes:
-                        - match: { prefix: "/" }
+                        # WebSocket connections are long-lived by design, so they get no request
+                        # timeout. Matching on the upgrade header rather than a path, because the
+                        # socket connects to "/" like everything else.
+                        - match:
+                            prefix: "/"
+                            headers:
+                              - name: upgrade
+                                string_match: { exact: websocket, ignore_case: true }
                           route:
                             cluster: api
                             timeout: 0s
+                        # Ordinary HTTP does get one. Previously a single `timeout: 0s` on the
+                        # catch-all route disabled request timeouts for plain HTTP as well, so a
+                        # stuck request could be held open indefinitely.
+                        - match: { prefix: "/" }
+                          route:
+                            cluster: api
+                            timeout: 30s
                 http_filters:
                   - name: envoy.filters.http.router
                     typed_config:
@@ -35,6 +49,16 @@ static_resources:
       connect_timeout: 2s
       type: STRICT_DNS
       lb_policy: ROUND_ROBIN
+      # Without active checks, a booting or already-dead instance stays in the rotation and
+      # takes its share of traffic. /healthz reports 503 while draining, so a shutting-down
+      # instance is pulled out before it stops listening.
+      health_checks:
+        - timeout: 2s
+          interval: 5s
+          unhealthy_threshold: 2
+          healthy_threshold: 1
+          http_health_check:
+            path: /healthz
       load_assignment:
         cluster_name: api
         endpoints:
