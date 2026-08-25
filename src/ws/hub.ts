@@ -1,5 +1,6 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { IncomingMessage, Server } from 'node:http';
+import { emit } from '../bus.ts';
 import { callerIdFromUrl } from '../http/identity.ts';
 import { participantConversationIds } from '../services/conversations.ts';
 
@@ -8,10 +9,19 @@ type Client = WebSocket & {
   subs?: Set<number>;
   /** Cleared before each ping; a client that never ponged back is dropped on the next sweep. */
   alive?: boolean;
+  /** Last typing notice per conversation, for the server-side throttle. */
+  lastTyping?: Map<number, number>;
 };
 
 /** How often to ping. A dead peer is detected within two intervals. */
 const HEARTBEAT_MS = 30_000;
+
+/**
+ * Floor on how often one socket may announce typing. The client throttles too, but a client is
+ * not something to rely on: without this, a hostile or buggy one could flood the bus and every
+ * other client with one event per keystroke.
+ */
+const TYPING_MIN_INTERVAL_MS = 1000;
 
 const clients = new Set<Client>();
 let wss: WebSocketServer | undefined;
@@ -32,6 +42,7 @@ export function attachWs(server: Server): void {
     ws.userId = userId;
     ws.subs = new Set();
     ws.alive = true;
+    ws.lastTyping = new Map();
     clients.add(ws);
 
     ws.on('pong', () => {
@@ -74,17 +85,39 @@ async function handleFrame(ws: Client, raw: string): Promise<void> {
   }
   if (typeof frame !== 'object' || frame === null) return;
 
-  const { type, conversationIds } = frame as { type?: unknown; conversationIds?: unknown };
-  if (type !== 'subscribe' || !Array.isArray(conversationIds) || ws.userId === undefined) return;
+  const { type } = frame as { type?: unknown };
+  if (ws.userId === undefined) return;
 
-  const requested = new Set(conversationIds.map(Number).filter(Number.isInteger));
-  try {
-    // A socket used to be able to subscribe to any id and tail conversations it had no part in.
-    // Intersecting with real membership makes the subscription list unforgeable.
-    const allowed = await participantConversationIds(ws.userId);
-    ws.subs = new Set(allowed.filter((id) => requested.has(id)));
-  } catch (err) {
-    console.error('[ws] could not resolve subscriptions', err);
+  if (type === 'subscribe') {
+    const { conversationIds } = frame as { conversationIds?: unknown };
+    if (!Array.isArray(conversationIds)) return;
+    const requested = new Set(conversationIds.map(Number).filter(Number.isInteger));
+    try {
+      // A socket used to be able to subscribe to any id and tail conversations it had no part
+      // in. Intersecting with real membership makes the subscription list unforgeable.
+      const allowed = await participantConversationIds(ws.userId);
+      ws.subs = new Set(allowed.filter((id) => requested.has(id)));
+    } catch (err) {
+      console.error('[ws] could not resolve subscriptions', err);
+    }
+    return;
+  }
+
+  if (type === 'typing') {
+    const { conversationId, active } = frame as { conversationId?: unknown; active?: unknown };
+    const id = Number(conversationId);
+    // Reuses the subscription set as the authorisation check: it was already intersected with
+    // real membership, so a socket cannot announce typing into a conversation it is not in.
+    if (!Number.isInteger(id) || !ws.subs?.has(id)) return;
+
+    const stopping = active === false;
+    if (!stopping) {
+      const last = ws.lastTyping?.get(id) ?? 0;
+      if (Date.now() - last < TYPING_MIN_INTERVAL_MS) return;
+      ws.lastTyping?.set(id, Date.now());
+    }
+
+    await emit({ type: 'typing', conversationId: id, userId: ws.userId, active: !stopping });
   }
 }
 
@@ -92,9 +125,14 @@ async function handleFrame(ws: Client, raw: string): Promise<void> {
  * Sends to this process's own sockets only. Cross-instance fan-out is the bus's job; this is
  * what the bus subscription calls once an event arrives.
  */
-export function deliverLocal(conversationId: number, payload: unknown): void {
+export function deliverLocal(
+  conversationId: number,
+  payload: unknown,
+  options: { exceptUserId?: number } = {},
+): void {
   const data = JSON.stringify(payload);
   for (const ws of clients) {
+    if (options.exceptUserId !== undefined && ws.userId === options.exceptUserId) continue;
     if (ws.subs?.has(conversationId) && ws.readyState === WebSocket.OPEN) {
       ws.send(data);
     }

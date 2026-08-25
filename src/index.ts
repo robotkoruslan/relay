@@ -43,7 +43,14 @@ await ensureMongoIndexes();
 await connectBus();
 
 // Every instance delivers every event to its own sockets, including events it published itself.
-onBusEvent((event) => deliverLocal(event.conversationId, event));
+// Typing notices skip their own author — including their other tabs, which is the right answer.
+onBusEvent((event) => {
+  deliverLocal(
+    event.conversationId,
+    event,
+    event.type === 'typing' ? { exceptUserId: event.userId } : {},
+  );
+});
 
 server.listen(config.port, () => {
   console.log(`relay listening on :${config.port}`);
