@@ -6,7 +6,7 @@ import { config } from './config.ts';
 import { beginDraining } from './lifecycle.ts';
 import { closeMysql, waitForMysql } from './db/mysql.ts';
 import { runMigrations } from './db/migrations.ts';
-import { closeMongo, connectMongo } from './db/mongo.ts';
+import { closeMongo, connectMongo, ensureMongoIndexes } from './db/mongo.ts';
 import { closeBus, connectBus, onBusEvent } from './bus.ts';
 import { errorHandler, notFoundHandler } from './http/errors.ts';
 import { conversationsRouter } from './routes/conversations.ts';
@@ -39,6 +39,7 @@ attachWs(server);
 await waitForMysql();
 await runMigrations();
 await connectMongo();
+await ensureMongoIndexes();
 await connectBus();
 
 // Every instance delivers every event to its own sockets, including events it published itself.

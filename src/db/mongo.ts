@@ -25,6 +25,17 @@ export async function connectMongo(retries = 20): Promise<Db> {
   throw new Error(`mongo not reachable after ${retries} attempts: ${String(lastErr)}`);
 }
 
+/**
+ * Idempotent, so it is safe to run on every boot. The text index is what makes search possible
+ * at all; the conversationId index serves the membership filter that scopes it.
+ */
+export async function ensureMongoIndexes(): Promise<void> {
+  const bodies = mongo().collection('message_bodies');
+  await bodies.createIndex({ body: 'text' }, { name: 'text_body' });
+  await bodies.createIndex({ conversationId: 1 }, { name: 'by_conversation' });
+  console.log('[mongo] indexes ensured');
+}
+
 export function mongo(): Db {
   if (!db) throw new Error('mongo not connected');
   return db;
